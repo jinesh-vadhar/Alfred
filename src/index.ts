@@ -1,6 +1,8 @@
 import { serve } from '@hono/node-server'
 import { Hono } from 'hono'
 import { GoogleGenAI } from '@google/genai'
+import { tasks, runs } from '@trigger.dev/sdk'
+import type { generateAiTask } from './trigger/ai.js'
 
 // Load environment variables locally from .env (in production Railway injects them)
 try {
@@ -17,7 +19,7 @@ async function generateAiReply(userPrompt: string): Promise<string> {
   }
 
   const ai = new GoogleGenAI({ apiKey })
-  const models = ['gemini-3.5-flash', 'gemini-3.5-flash-lite']
+  const models = ['gemini-3.5-flash-lite', 'gemini-3.5-flash']
   let lastError: any = null
 
   for (const model of models) {
@@ -68,6 +70,72 @@ app.get('/', (c) => {
 // Marco Polo route
 app.get('/marco', (c) => {
   return c.text('polo')
+})
+
+// ==========================================
+// Temporary Test GET Endpoint (AI SDK & Trigger.dev)
+// Note: This route is publicly accessible for testing and will be removed later.
+// ==========================================
+app.get('/test-ai', async (c) => {
+  const prompt = c.req.query('prompt') || 'Tell me an inspiring one-line tech quote.'
+
+  // Attempt 1: Trigger background task using Trigger.dev and poll for the result
+  if (process.env.TRIGGER_SECRET_KEY) {
+    try {
+      const handle = await tasks.trigger<typeof generateAiTask>('generate-ai-text', { prompt })
+
+      // Wait up to 10 seconds for the Trigger.dev worker to complete the task
+      const polledRun = await Promise.race([
+        runs.poll(handle.id),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 10000))
+      ])
+
+      if (polledRun && polledRun.status === 'COMPLETED' && polledRun.output) {
+        return c.json({
+          ok: true,
+          mode: 'trigger.dev-task',
+          taskId: 'generate-ai-text',
+          runId: handle.id,
+          prompt,
+          response: (polledRun.output as any).text,
+          model: (polledRun.output as any).model,
+          timestamp: (polledRun.output as any).timestamp
+        })
+      }
+
+      // If worker took longer or is still processing in background, provide instant fallback
+      if (!polledRun || polledRun.status !== 'COMPLETED') {
+        const directReply = await generateAiReply(prompt)
+        return c.json({
+          ok: true,
+          mode: 'trigger.dev-task-queued (with instant AI fallback)',
+          taskId: 'generate-ai-text',
+          runId: handle.id,
+          status: polledRun ? polledRun.status : 'QUEUED',
+          prompt,
+          response: directReply
+        })
+      }
+    } catch (triggerError: any) {
+      console.warn('Trigger.dev task trigger encountered error, falling back to direct AI generation:', triggerError?.message || triggerError)
+    }
+  }
+
+  // Attempt 2: Direct AI SDK generation fallback
+  try {
+    const directReply = await generateAiReply(prompt)
+    return c.json({
+      ok: true,
+      mode: 'direct-ai-sdk',
+      prompt,
+      response: directReply
+    })
+  } catch (err: any) {
+    return c.json({
+      ok: false,
+      error: err?.message || 'Failed to generate AI response'
+    }, 500)
+  }
 })
 
 // Telegram Webhook route (AI Bot)
