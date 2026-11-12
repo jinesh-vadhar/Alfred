@@ -1,11 +1,61 @@
 import { serve } from '@hono/node-server'
 import { Hono } from 'hono'
+import { GoogleGenAI } from '@google/genai'
 
 // Load environment variables locally from .env (in production Railway injects them)
 try {
   process.loadEnvFile()
 } catch {
   // If .env is missing, ignore
+}
+
+// Helper to generate AI response from Gemini using official SDK
+async function generateAiReply(userPrompt: string): Promise<string> {
+  const apiKey = process.env.GEMINI_API_KEY
+  if (!apiKey) {
+    throw new Error('GEMINI_API_KEY is not configured')
+  }
+
+  const ai = new GoogleGenAI({ apiKey })
+  const models = ['gemini-3.5-flash', 'gemini-3.5-flash-lite']
+  let lastError: any = null
+
+  for (const model of models) {
+    try {
+      const response = await ai.models.generateContent({
+        model,
+        contents: userPrompt
+      })
+      if (response?.text) {
+        return response.text
+      }
+    } catch (err: any) {
+      console.warn(`Model ${model} failed:`, err?.message || err)
+      lastError = err
+    }
+  }
+
+  throw lastError || new Error('All Gemini models were unavailable')
+}
+
+// Helper to send message to Telegram
+async function sendTelegramMessage(botToken: string, chatId: number | string, text: string) {
+  // Truncate to stay safely within Telegram's 4096-character limit
+  const safeText = text.length > 4000 ? text.slice(0, 4000) + '...' : text
+
+  const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text: safeText
+    })
+  })
+
+  if (!response.ok) {
+    const errorData = await response.text()
+    console.error('Failed to send Telegram message:', errorData)
+  }
 }
 
 const app = new Hono()
@@ -15,12 +65,12 @@ app.get('/', (c) => {
   return c.text('Hello Hono!')
 })
 
-// Marco Polo route checking 
+// Marco Polo route
 app.get('/marco', (c) => {
   return c.text('polo')
 })
 
-// Telegram Webhook route (Echo bot)
+// Telegram Webhook route (AI Bot)
 app.post('/webhook', async (c) => {
   const expectedSecret = process.env.TELEGRAM_WEBHOOK_SECRET
   const botToken = process.env.TELEGRAM_BOT_TOKEN
@@ -47,23 +97,30 @@ app.post('/webhook', async (c) => {
       const chatId = update.message.chat.id
       const userText = update.message.text
 
-      // Echo message back to user via Telegram Bot API
-      const telegramUrl = `https://api.telegram.org/bot${botToken}/sendMessage`
-      const response = await fetch(telegramUrl, {
+      // Send immediate "typing..." status so user knows bot is thinking
+      fetch(`https://api.telegram.org/bot${botToken}/sendChatAction`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: userText
-        })
-      })
+        body: JSON.stringify({ chat_id: chatId, action: 'typing' })
+      }).catch(() => {})
 
-      if (!response.ok) {
-        const errorData = await response.text()
-        console.error('Failed to send Telegram message:', errorData)
-      }
+      // Process AI response asynchronously to prevent Telegram webhook timeout
+      ;(async () => {
+        try {
+          const replyText = await generateAiReply(userText)
+          await sendTelegramMessage(botToken, chatId, replyText)
+        } catch (aiErr) {
+          console.error('AI generation error:', aiErr)
+          await sendTelegramMessage(
+            botToken,
+            chatId,
+            "Sorry, I had trouble generating a reply. Please try asking again in a moment!"
+          )
+        }
+      })()
     }
 
+    // Acknowledge Telegram immediately with 200 OK
     return c.json({ ok: true })
   } catch (err) {
     console.error('Error handling webhook update:', err)

@@ -1,5 +1,6 @@
 # Agent skills & configs
 .agents/
+.trigger/
 
 # Dependencies
 node_modules/
