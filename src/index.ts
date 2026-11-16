@@ -75,8 +75,9 @@ app.get('/marco', (c) => {
 // ==========================================
 // Temporary Test GET Endpoint (AI SDK & Trigger.dev)
 // Note: This route is publicly accessible for testing and will be removed later.
+// Supports both /test-ai and /test/ai
 // ==========================================
-app.get('/test-ai', async (c) => {
+const handleTestAi = async (c: any) => {
   const prompt = c.req.query('prompt') || 'Tell me an inspiring one-line tech quote.'
 
   // Attempt 1: Trigger background task using Trigger.dev and poll for the result
@@ -136,7 +137,10 @@ app.get('/test-ai', async (c) => {
       error: err?.message || 'Failed to generate AI response'
     }, 500)
   }
-})
+}
+
+app.get('/test-ai', handleTestAi)
+app.get('/test/ai', handleTestAi)
 
 // Telegram Webhook route (AI Bot)
 app.post('/webhook', async (c) => {
